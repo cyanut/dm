@@ -4,9 +4,8 @@ import gym
 import sonnet as snt
 import random
 import os
-from utils import CNN, DDQN, QAgent, ReplayBuffer, DummySummary
-from utils import mk_gif_image_summary
-from utils import _array_to_gif
+from utils import CNN, DDQN, QAgent, ReplayBuffer, DummySummary, DNN
+from utils import mk_gif_image_summary, _array_to_gif
 
 
 FLAGS = tf.flags.FLAGS
@@ -21,7 +20,7 @@ tf.flags.DEFINE_float("epsilon_period", 1e6, "epsilon decay rate")
 tf.flags.DEFINE_float("epsilon_max", 1., "epsilon max")
 tf.flags.DEFINE_float("epsilon_min", .1, "epsilon min")
 tf.flags.DEFINE_integer("replay_buffer_size", 500000, "Size of experience replay buffer")
-tf.flags.DEFINE_integer("batch_size", 64, "Replay batch size")
+tf.flags.DEFINE_integer("batch_size", 64, "Replay bamch size")
 tf.flags.DEFINE_integer("report_freq", 50, "Number of episode for reporting")
 tf.flags.DEFINE_integer("test_freq", 100, "Freq for testing")
 tf.flags.DEFINE_integer("test_episode", 50, "Number of testing episode")
@@ -72,13 +71,23 @@ def main():
         is_running = tf.placeholder(shape=[None], dtype=tf.float32, name="is_running")
     #global_step_op = tf.train.create_global_step()
     global_step_op = tf.Variable(0, dtype=tf.int32, trainable=False, name='global_step')
-    agent = QAgent(Model=DDQN, 
-                   model_params=dict(output_size=env.action_space.n, 
-                                     layer_size=[64,64]),
-                   reward_discount = FLAGS.reward_discount,
-                   update_frac = FLAGS.update_frac,
-                   learning_rate = FLAGS.learning_rate,
+    SELECT_MODEL = "DQN"
+    if SELECT_MODEL == "DDQN":
+        agent = QAgent(Model=DDQN, 
+                       model_params=dict(output_size=env.action_space.n, 
+                                         layer_size=[64,64]),
+                       reward_discount = FLAGS.reward_discount,
+                       update_frac = FLAGS.update_frac,
+                       learning_rate = FLAGS.learning_rate,
                    )
+    elif SELECT_MODEL == "DQN":
+        agent = QAgent(Model=DNN, 
+                       model_params=dict(output_size=env.action_space.n, 
+                                         layer_size=[64,64]),
+                       reward_discount = FLAGS.reward_discount,
+                       update_frac = 1.,
+                       learning_rate = FLAGS.learning_rate,
+                       )
     cost_op, trainer_op = agent(state=state, action=action, new_state=new_state, reward=reward, is_running=is_running, global_step=global_step_op)
     cost_summary_op = tf.summary.scalar("cost", tf.reduce_mean(cost_op))
     agent_model_update_op = agent.update_target_network()
@@ -175,12 +184,13 @@ def main():
 
                 if images:
                     images = np.array(images)
-                    print(' *** images min: {}, max: {}, dtype: {}, shape: {} *** '.format(np.min(images), np.max(images), images.dtype, images.shape))
                     gif_summary = mk_gif_image_summary(images,
                                                         frame_rate=15)
                     summary.value.add(image = gif_summary,
                         tag="sample video at step {}".format(global_step))
-                    print(" *** Recorded videos at step {}".format(global_step))
+                    with open("/scratch/cyan/temp/step_{}.gif".format(global_step), "wb") as fo:
+                        fo.write(_array_to_gif(images, frame_rate=20))
+                    print(" *** Recorded {} frames at step {} ***".format(images.shape[0], global_step))
                 summ_writer.add_summary(summary, global_step=global_step)
                 print("Testing {} episodes: average survived {} of {} steps, average reward = {:.3f}".format(FLAGS.test_episode, test_step, FLAGS.max_episode_length, test_reward))
 

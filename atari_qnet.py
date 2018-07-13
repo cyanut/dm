@@ -6,6 +6,7 @@ import random
 import os
 import scipy
 from utils import CNN, DDQN, QAgent, ReplayBuffer, DummySummary 
+from utils import mk_gif_image_summary
 import time
 
 
@@ -21,7 +22,7 @@ tf.flags.DEFINE_integer("max_episode_length", 36000, "max number of steps per ep
 tf.flags.DEFINE_float("epsilon_period", 1e5, "epsilon decay rate")
 tf.flags.DEFINE_float("epsilon_max", 1., "epsilon max")
 tf.flags.DEFINE_float("epsilon_min", .1, "epsilon min")
-tf.flags.DEFINE_integer("replay_buffer_size", 500000, "Size of experience replay buffer")
+tf.flags.DEFINE_integer("replay_buffer_size", 50000, "Size of experience replay buffer")
 tf.flags.DEFINE_integer("batch_size", 64, "Replay batch size")
 tf.flags.DEFINE_integer("report_freq", 50, "Number of episode for reporting")
 tf.flags.DEFINE_integer("test_freq", 100, "Freq for testing")
@@ -29,6 +30,7 @@ tf.flags.DEFINE_integer("test_episode", 50, "Number of testing episode")
 tf.flags.DEFINE_string("save_path", "", "Path to save model")
 tf.flags.DEFINE_string("summary_path", "", "Path to save summary")
 tf.flags.DEFINE_integer("save_freq", 1000, "Freq to save model")
+tf.flags.DEFINE_integer("record_freq", 10000, "Number of global steps to record a test episode")
 
 np.random.seed(FLAGS.seed)
 tf.set_random_seed(FLAGS.seed)
@@ -150,10 +152,11 @@ def main():
         ckpt = tf.train.get_checkpoint_state(os.path.dirname(FLAGS.save_path))
         if ckpt and ckpt.model_checkpoint_path: 
             saver.restore(sess, ckpt.model_checkpoint_path)
+        last_video_at_step = 0
         t = 0
         for num_ep in range(FLAGS.num_episode):
             t1 = time.time()
-            print("Episode {}: time {:.3f}, step {}" .format(num_ep-1, t1 - t, global_step))
+            #print("Episode {}: time {:.3f}, step {}" .format(num_ep-1, t1 - t, global_step))
             t = t1
                 
             s = env.reset()
@@ -203,9 +206,16 @@ def main():
             if num_ep % FLAGS.test_freq == 0:
                 test_reward = 0
                 test_step = 0
+                images = []
                 for test_num_ep in range(FLAGS.test_episode):
+                    recording = False
+                    if global_step - last_video_at_step > FLAGS.record_freq:
+                        recording = True
+                        last_video_at_step = global_step
                     s = env.reset()
                     for step in range(FLAGS.max_episode_length):
+                        if recording:
+                            images.append(env.render(mode="rgb_array"))
                         a = sess.run(inference_op, {state: s[None,...]})[0]
                         s_prime, r, is_end, _ = env.step(np.argmax(a))
                         s = s_prime
@@ -218,6 +228,14 @@ def main():
                 test_step /= FLAGS.test_episode
                 summary.value.add(tag="testing episode length", simple_value = test_step)
                 summary.value.add(tag="testing reward per episode", simple_value = test_reward)
+                if images:
+                    images = np.array(images)
+                    gif_summary = mk_gif_image_summary(images, 
+                                                       frame_rate = 15)
+                    summary.value.add(image = gif_summary, 
+                        tag = "sample video at step {}".format(global_step))
+                    print(" *** Recorded {} frames at step {} *** ".format(\
+                            images.shape[0], global_step))
                 summ_writer.add_summary(summary, global_step=global_step)
                 print("Testing {} episodes: average survived {} of {} steps, average reward = {:.3f}".format(FLAGS.test_episode, test_step, FLAGS.max_episode_length, test_reward))
 

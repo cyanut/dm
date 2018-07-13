@@ -131,17 +131,16 @@ def _array_to_gif(arr, frame_rate):
         pix_fmt = 'rgb24'
     if arr.dtype == np.float:
         arr = np.round(arr * 255).astype('uint8')
-    cmdstr = ('ffmpeg', '-y', '-r', str(frame_rate), \
+    cmdstr = ('ffmpeg', '-y', '-r', str(frame_rate), 
+              '-nostats', '-loglevel', '0',
               '-f', 'rawvideo', '-pix_fmt', pix_fmt, 
               '-s', '{}x{}'.format(arr.shape[-2], arr.shape[-3]), '-i', '-',
               '-filter_complex', 
-              '[0:v] split [a][b]; [a] palettegen [p]; [b][p] paletteuse',
+              '[0:v] split [a][b]; [a] fifo [a0]; [b] fifo [b0]; [a0] palettegen,fifo [p]; [b0][p] paletteuse,fifo',
               '-f', 'gif', '-')
-    p = subprocess.Popen(cmdstr, stdin=subprocess.PIPE, 
-            stdout=subprocess.PIPE, shell=False, bufsize=2**20)
-    res,_ = p.communicate(arr.tobytes())
-    p.stdin.close()
-    p.wait()
+    with subprocess.Popen(cmdstr, stdin=subprocess.PIPE, 
+            stdout=subprocess.PIPE, shell=False, bufsize=2**20) as p:
+        res,_ = p.communicate(arr.tobytes())
     return res
 
 
@@ -182,3 +181,24 @@ class DummySummary():
         pass
     def add_graph(self, *args):
         pass
+
+if __name__ == "__main__":
+    import gym
+    import time
+    import sys
+    env = gym.make("Breakout-v0")
+    env.reset()
+    img = []
+    is_end = False
+    while not is_end:
+        img.append(env.render(mode="rgb_array"))
+        s, r, is_end, _ = env.step(env.action_space.sample())
+    print(len(img), img[0].shape)
+    with open(sys.argv[1], "wb") as fo:
+        res = _array_to_gif(np.array(img), frame_rate=30)
+        print(len(res))
+        fo.write(res)
+        
+
+
+        
