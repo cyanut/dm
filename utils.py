@@ -3,7 +3,8 @@ import tensorflow as tf
 import sonnet as snt
 import random
 import os
-import subprocess
+from numpngw import write_apng
+import io
 
 class CNN(snt.AbstractModule):
     def __init__(self, conv_params, max_pool_params = {}, name="CNN"):
@@ -124,6 +125,7 @@ class ReplayBuffer:
         random.shuffle(samples)
         return [np.array(x) for x in zip(*samples)]
 
+'''
 def _array_to_gif(arr, frame_rate):
     if len(arr.shape) == 3:
         pix_fmt = 'gray8'
@@ -142,6 +144,15 @@ def _array_to_gif(arr, frame_rate):
             stdout=subprocess.PIPE, shell=False, bufsize=2**20) as p:
         res,_ = p.communicate(arr.tobytes())
     return res
+'''
+def _array_to_gif(arr, frame_rate):
+    if len(arr.shape) == 3:
+        arr = np.array([arr]*3).transpose([1,2,3,0])
+    if arr.dtype == np.float:
+        arr = np.round(arr * 255).astype('uint8')
+    res = io.BytesIO(b"")
+    write_apng(res, arr, delay=1000./frame_rate)
+    return res.getbuffer()
 
 
 def mk_gif_image_summary(video, frame_rate=10):
@@ -182,17 +193,36 @@ class DummySummary():
     def add_graph(self, *args):
         pass
 
+def frame_hash(arr):
+    return hex(hash(np.round(arr*16).astype('uint8').tostring()))
+
+
 if __name__ == "__main__":
     import gym
     import time
     import sys
-    env = gym.make("Breakout-v0")
+    from atari_qnet import PreprocessedAtariEnv
+    env = PreprocessedAtariEnv("Breakout-v0")
     env.reset()
     img = []
     is_end = False
+    counter = 0
     while not is_end:
+        counter += 1
         img.append(env.render(mode="rgb_array"))
         s, r, is_end, _ = env.step(env.action_space.sample())
+        if counter % 100 == 0:
+            print(counter)
+    img = []
+    is_end = False
+    env.reset()
+
+    while not is_end:
+        counter += 1
+        img.append(env.render(mode="rgb_array"))
+        s, r, is_end, _ = env.step(env.action_space.sample())
+        if counter % 100 == 0:
+            print(counter)
     print(len(img), img[0].shape)
     with open(sys.argv[1], "wb") as fo:
         res = _array_to_gif(np.array(img), frame_rate=30)
