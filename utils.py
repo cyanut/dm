@@ -194,6 +194,8 @@ class DummySummary():
         pass
 
 def frame_hash(arr):
+    if arr is None:
+        return None
     return hex(hash(np.round(arr*16).astype('uint8').tostring()))
 
 
