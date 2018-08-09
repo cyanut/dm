@@ -152,7 +152,7 @@ def _array_to_gif(arr, frame_rate):
         arr = np.round(arr * 255).astype('uint8')
     res = io.BytesIO(b"")
     write_apng(res, arr, delay=1000./frame_rate)
-    return res.getbuffer()
+    return res.getvalue()
 
 
 def mk_gif_image_summary(video, frame_rate=10):

@@ -20,7 +20,7 @@ rank = mp.Get_rank()
 mp_size = mp.Get_size()
 
 import logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 
 
 FLAGS = tf.flags.FLAGS
@@ -30,19 +30,19 @@ tf.flags.DEFINE_float("reward_discount", .99, "Reward discount")
 tf.flags.DEFINE_integer("update_freq", 50, "Steps to update target Q")
 tf.flags.DEFINE_float("update_frac", .01, "update fraction")
 tf.flags.DEFINE_integer("num_episode", 20000, "Number of episode to train")
-tf.flags.DEFINE_integer("num_steps", 20000, "Number of steps to train")
+tf.flags.DEFINE_integer("num_steps", 200000, "Number of steps to train")
 tf.flags.DEFINE_integer("max_episode_length", 36000, "max number of steps per episode")
 tf.flags.DEFINE_float("epsilon_period", 1e5, "epsilon decay rate")
 tf.flags.DEFINE_float("epsilon_max", 1., "epsilon max")
 tf.flags.DEFINE_float("epsilon_min", .1, "epsilon min")
-tf.flags.DEFINE_integer("replay_buffer_size", 50000, "Size of experience replay buffer")
-tf.flags.DEFINE_integer("batch_size", 64, "Replay batch size")
-tf.flags.DEFINE_integer("report_freq", 50, "Number of episode for reporting")
-tf.flags.DEFINE_integer("test_freq", 100, "Freq for testing")
+tf.flags.DEFINE_integer("replay_buffer_size", 10000, "Size of experience replay buffer")
+tf.flags.DEFINE_integer("batch_size", 256, "Replay batch size")
+tf.flags.DEFINE_integer("report_freq", 2000, "Number of episode for reporting")
+tf.flags.DEFINE_integer("test_freq", 10000, "Freq for testing")
 tf.flags.DEFINE_integer("test_episode", 50, "Number of testing episode")
 tf.flags.DEFINE_string("save_path", "", "Path to save model")
 tf.flags.DEFINE_string("summary_path", "", "Path to save summary")
-tf.flags.DEFINE_integer("save_freq", 1000, "Freq to save model")
+tf.flags.DEFINE_integer("save_freq", 50000, "Freq to save model")
 tf.flags.DEFINE_integer("record_freq", 10000, "Number of global steps to record a test episode")
 tf.flags.DEFINE_integer("record_fps", 30, "Number of global steps to record a test episode")
 
@@ -53,6 +53,7 @@ class COMM():
     RUN = 1
     ACTION = 2
     EXPERIENCE = 3
+    STATS = 4
     '''
     RUN = enum.auto()
     ACTION = enum.auto()
@@ -183,6 +184,7 @@ def env_worker(rank, env_name, global_step, root=0, buffer_size=4, temp_dir=None
                     recording["actions"].append(None)
             else:
                 data = {"expr":expr_buf, "state":s}
+                logger.debug("sending action requests with {} experiences.".format(len(expr_buf)))
                 expr_req = mp.isend(data, dest=root, tag=COMM.ACTION)
 
                 logger.debug("waiting for actions.")
@@ -207,10 +209,10 @@ def env_worker(rank, env_name, global_step, root=0, buffer_size=4, temp_dir=None
                 if temp_dir:
                     recording["actions"].append(a)
                 
-                logger.debug("action received {}, global_step={}.".format(a, global_step))
+                logger.debug("action received {}, global_step={}, explore_prob={}.".format(a, global_step, explore_prob))
             s_prime, r, is_end, _ = env.step(np.argmax(a))
             global_step += 1
-            total_reward += r
+            episode_reward += r
             expr_buf.append([s, a, s_prime, r, is_end])
             if temp_dir:
                 all_expr.append([s, a, s_prime, r, is_end])
@@ -225,7 +227,8 @@ def env_worker(rank, env_name, global_step, root=0, buffer_size=4, temp_dir=None
                    "global_steps":global_step, 
                    "explore_prob":explore_prob,
                    }
-        mp.isend(summary, dest=root, tag=COMM.STATS)
+        summary_copy = summary.copy()
+        mp.send(summary_copy, dest=root, tag=COMM.STATS)
         logger.debug("sending summaries {}".format(summary))
                     
     
@@ -303,8 +306,10 @@ def test_env_worker(temp_dir):
         global_step += len(res[0])
         print("global_step:", global_step)
         summary = worker_pool.icollect_data(tag=COMM.STATS)
-        print(summary)
-        #time.sleep(.1)
+        print("Received summary:", summary)
+        if summary[0]:
+            time.sleep(3)
+
     worker_pool.ibcast_data(data=False, tag=COMM.RUN)
     import pickle
     reqs = [mp.irecv(source=i, tag=COMM.RUN) for i in range(1, mp_size)]
@@ -383,8 +388,9 @@ def test_env_worker_min():
 def root():
     #Root
     logger = logging.getLogger("root")
-    worker_pool = MPI_IPool(comm = mp,
-            sources=[x for x in range(mp_size) if x != rank])
+    buf_size = 4
+    worker_pool = MPI_IPool(comm = mp, buf_size = 2 ** 25,
+            sources=[x for x in range(mp_size) if x != rank],)
     env = PreprocessedAtariEnv("Breakout-v0", buffer_size=buf_size)
     s = env.reset()
     with tf.name_scope("Environment") as scope:
@@ -433,18 +439,22 @@ def root():
         if ckpt and ckpt.model_checkpoint_path: 
             saver.restore(sess, ckpt.model_checkpoint_path)
         last_video_at_step = 0
+        last_update_step = 0
+        last_train_report_step = 0
+        last_test_step = 0
+        last_save_step = 0
         t = 0
         stats = {}
-        while global_step < FLAGS.max_steps:
-
+        worker_pool.ibcast_data(data=True, tag=COMM.RUN)
+        while global_step < FLAGS.num_steps:
             inference_states = []
             res = worker_pool.icollect_data(tag=COMM.ACTION)
-            logger.debug("received {} experiences from {}".format(len(expr[0]), expr[1]))
+            #logger.debug("received {} experiences from {}".format(len(res[0]), res[1]))
             states = []
             expr = []
-            for r, worker_rank in zip(*exprs):
+            for r, worker_rank in zip(*res):
                 expr += r["expr"]
-                states.append(r["states"])
+                states.append(r["state"])
 
             if states:
                 qa = sess.run(inference_op, {state: np.array(states)})
@@ -453,8 +463,12 @@ def root():
                         tag=COMM.ACTION, 
                         idx=res[1])
             global_step += len(expr)
-            [replay_buff.add(x) for x in expr]
-
+            for x in expr:
+                replay_buff.add(x)
+            if len(replay_buff.buffer) < 1:
+                logger.info("populating replay buffer ...")
+                continue
+            t = time.time()
             s_batch, a_batch, s_prime_batch, r_batch, is_running_batch = \
                     replay_buff.sample(FLAGS.batch_size)
             _, loss, summary, global_step = sess.run(\
@@ -465,17 +479,21 @@ def root():
                      reward: r_batch,
                      is_running: is_running_batch})
             summ_writer.add_summary(summary, global_step=global_step) 
-            if global_step % FLAGS.update_freq == 0:
+            if global_step - last_update_step > FLAGS.update_freq:
                 sess.run(agent_model_update_op)
+                last_update_step = global_step
+            logger.debug("GPU time: {.3f}".format(time.time() -t)
 
                 
             worker_stats = worker_pool.icollect_data(tag=COMM.STATS)
-            for k, v in worker_stats.items():
-                if not k in stats:
-                    stats[k] = []
-                stats[k].append(v)
+            for d in worker_stats[0]:
+                for k,v in d.items():
+                    if not k in stats:
+                        stats[k] = []
+                    stats[k].append(v)
 
-            if num_ep % FLAGS.report_freq == 0:
+            if global_step - last_train_report_step > FLAGS.report_freq:
+                last_train_report_step = global_step
                 fmt_string = ["{} = {}".format(k, np.mean(v)) \
                         for k, v in stats.items()]
                 logger.info("Training summary at global step {}, {}"\
@@ -489,7 +507,8 @@ def root():
                 average_step = 0
                 average_reward = 0
             '''
-            if num_ep % FLAGS.test_freq == 0:
+            if global_step - last_test_step > FLAGS.test_freq:
+                last_test_step = global_step
                 summary = tf.Summary()
                 test_reward = 0
                 test_step = 0
@@ -526,12 +545,15 @@ def root():
                 summ_writer.add_summary(summary, global_step=global_step)
                 logger.info("Testing {} episodes: average survived {} of {} steps, average reward = {:.3f}".format(FLAGS.test_episode, test_step, FLAGS.max_episode_length, test_reward))
 
-            if FLAGS.save_path != "" and num_ep % FLAGS.save_freq == 0:
+            if FLAGS.save_path != "" and \
+                    global_step - last_save_step > FLAGS.save_freq:
+                last_save_step = global_step
                 saver.save(sess, FLAGS.save_path, global_step=global_step)
                 logger.info(" *** model saved to {} at step {} ***".format(FLAGS.save_path, global_step))
                 
         #FIXME
         time.sleep(1)
+    worker_pool.ibcast_data(data=False, tag=COMM.RUN)
 
 def main():
     env_name = "Breakout-v0"
@@ -542,11 +564,11 @@ def main():
 
             
 if __name__ == "__main__":
-    #main()
+    main()
     #import os
     #test_atari_env("/scratch/cyan/env_worker_test/env.png")
     #test_env_worker(os.environ["SLURM_TMPDIR"]+"/")
-    test_env_worker("/scratch/cyan/env_worker_test/")
+    #test_env_worker("/scratch/cyan/env_worker_test/")
     #test_env_worker_min()
 
 
